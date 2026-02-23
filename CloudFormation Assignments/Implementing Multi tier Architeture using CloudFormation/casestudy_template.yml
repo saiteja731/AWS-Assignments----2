@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  AmiId:
+    Type: String
+    Description: "AMI ID for the EC2 instance" 
+
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: "Name of an existing EC2 KeyPair to enable SSH access."
+
+  DBName:
+    Type: String
+    Default: "testdb"
+    Description: "The name of the database to be created in the RDS instance."
+
+  DBUser:
+    Type: String
+    Default: "dbadmin"
+    Description: "The database admin account username."
+
+  DBPassword:
+    Type: String
+    Description: "The database admin account password (must be at least 8 chars)."
+    MinLength: 8
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: Dev-VPC}]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  
+  PublicSubnetWeb:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: Web-Tier-Public}]
+
+  PrivateSubnetApp:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags: [{Key: Name, Value: App-Tier-Private}]
+
+  PrivateSubnetDB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ] # Different AZ for RDS High Availability
+      Tags: [{Key: Name, Value: DB-Tier-Private}]
+
+ 
+  MyDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for RDS Instance
+      SubnetIds: 
+        - !Ref PrivateSubnetApp
+        - !Ref PrivateSubnetDB
+
+  
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetWeb
+      RouteTableId: !Ref PublicRouteTable
+
+ 
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH from Internet
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH only from Web Tier
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL from App Tier
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId   
+      KeyName: !Ref KeyName       
+      InstanceType: t2.micro
+      SubnetId: !Ref PublicSubnetWeb
+      SecurityGroupIds: [!Ref WebSecurityGroup]
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      SubnetId: !Ref PrivateSubnetApp
+      SecurityGroupIds: [!Ref AppSecurityGroup]
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain
+    Properties:
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      VPCSecurityGroups: [!Ref DBSecurityGroup]
+
+Outputs:
+  WebPublicIP:
+    Description: "Public IP address of the Web Instance"
+    Value: !GetAtt WebInstance.PublicIp
+
+  AppPrivateIP:
+    Description: "Private IP address of the App Instance (Accessible via SSH from Web Tier)"
+    Value: !GetAtt AppInstance.PrivateIp
+
+  RDSEndpoint:
+    Description: "The connection endpoint for the RDS Database"
+    Value: !GetAtt RDSInstance.Endpoint.Address
